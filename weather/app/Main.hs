@@ -1,25 +1,159 @@
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE LambdaCase #-}
 
-module Main where
+module Main (
+  main
+) where
 
-import Weather
+import Control.Monad (when)
+import Data.List (intercalate)
+import Data.Semigroup ((<>))
+import Data.Version (showVersion)
+import System.Exit (die)
+import System.IO (IOMode(ReadMode), hGetLine, hPrint, stderr, withFile)
 
-mykey :: APIKey
-mykey   = "top-secret"
+import Options.Applicative (
+    (<**>), (<|>), Parser, auto, execParser, fullDesc, header, help, helper,
+    info, long, metavar, option, optional, short, strOption, switch
+  )
+import System.Directory (createDirectoryIfMissing)
+import System.Environment.XDG.BaseDir (getUserConfigDir, getUserConfigFile)
 
-mycity, mystate :: String
-mycity  = "Detroit"
-mystate = "MI"
+import Paths_openweathermap (version) -- from cabal
+import qualified Client as Client
+import qualified Types.CurrentWeather as CurrentWeather
+import qualified Types.Main as Main
+import qualified Types.Weather as Weather
+import qualified Types.Wind as Wind
+
+appName :: String
+appName = "openweathermap"
+
+parseLocation :: Parser Client.Location
+parseLocation = byName <|> byCoord
+  where
+    byName = Client.Name <$> strOption
+      (  long "city"
+      <> short 'c'
+      <> metavar "CITY"
+      <> help "City name" )
+
+data ApiKey
+  = ApiKeyFile FilePath
+  | ApiKey String
+
+parseApiKey :: Parser ApiKey
+parseApiKey = fromFile <|> inCmdLine
+  where
+    fromFile = ApiKeyFile <$> strOption
+      (  long "api-key-file"
+      <> short 'K'
+      <> metavar "APIKEYFILE"
+      <> help "Read API key from this file" )
+
+    inCmdLine = ApiKey <$> strOption
+      (  long "api-key"
+      <> short 'k'
+      <> metavar "APIKEY"
+      <> help "API key" )
+
+
+data Config = Config
+  { apikey :: Maybe ApiKey
+  , location :: Client.Location
+  , debug :: Bool
+  }
+
+parseConfig :: Parser Config
+parseConfig = Config
+          <$> optional parseApiKey
+          <*> parseLocation
+          <*> switch (long "debug" <> short 'd' <> help "Enable debug")
+
+getApiKey :: Maybe ApiKey -> IO String
+getApiKey (Just (ApiKey key)) = return key
+getApiKey (Just (ApiKeyFile f)) = withFile f ReadMode hGetLine
+getApiKey Nothing = do
+  createDirectoryIfMissing True =<< getUserConfigDir appName
+  getUserConfigFile appName "key" >>= getApiKey . Just . ApiKeyFile
+
+
+showLocation :: CurrentWeather.CurrentWeather -> String
+showLocation w = city ++ maybe "" ("," ++) country ++ " " ++ coords
+  where
+    name = CurrentWeather.name w
+    coord = CurrentWeather.coord w
+    country = Sys.country . CurrentWeather.sys $ w
+    city = if name /= "" then name else "<unknown>"
+    coords = "("++ show (Coord.lat coord) ++ "°, "
+                ++ show (Coord.lon coord) ++ "°)"
+
+showWeather :: [Weather.Weather] -> String
+showWeather w = intercalate "," $ Weather.main <$> w
+
+showHumidity :: Main.Main -> String
+showHumidity m = "H " ++ show hm ++ " %"
+  where
+    hm :: Int
+    hm = round . Main.humidity $ m
+
+-- https://en.wikipedia.org/wiki/Millimeter_of_mercury
+showPressure :: Main.Main -> String
+showPressure m = "P " ++ show p ++ " mmHg"
+  where
+    hPa2mmHg hpa = hpa * 0.750061561303
+    p :: Int
+    p = round . hPa2mmHg . Main.pressure $ m
+
+-- https://stackoverflow.com/q/7490660/933161
+showWind :: Wind.Wind -> String
+showWind w = dir ++ " " ++ show speed ++ " m/s"
+  where
+    speed :: Int
+    speed = round . Wind.speed $ w
+    deg = Wind.deg w
+    --     [ "N", "NE", "E", "SE", "S", "SW", "W", "NW" ]
+    dirs = [ "↓", "↙",  "←", "↖",  "↑", "↗",  "→", "↘"  ]
+    l = length dirs
+    sector = round $ (deg * fromIntegral l) / 360.0
+    dir = dirs !! (sector `rem` l)
+
+showTemp :: Main.Main -> String
+showTemp m = "T " ++ temp ++ " °C"
+  where
+    k2c k = k - 273.15 -- Kelvin to Celsius
+    tmax :: Int
+    tmin :: Int
+    tmax = round . k2c . Main.temp_max $ m
+    tmin = round . k2c . Main.temp_min $ m
+    show' t = if t > 0 then "+" ++ show t else show t
+    temp = if tmax /= tmin
+           then show' tmin ++ ".." ++ show' tmax
+           else show' tmin
+
+printWeather :: CurrentWeather.CurrentWeather -> IO ()
+printWeather w = putStrLn out
+  where
+    weather = showWeather $ CurrentWeather.weather w
+    place = showLocation w
+    mainw = CurrentWeather.main w
+    wind = CurrentWeather.wind w
+    out = place ++ ": " ++ intercalate ",  "
+      [ weather, showHumidity mainw, showPressure mainw, showTemp mainw,
+        showWind wind ]
+
+run :: Config -> IO ()
+run cfg = do
+  appid <- getApiKey . apikey $ cfg
+  Client.getWeather appid (location cfg) >>= \case
+    Left err      -> die $ show err
+    Right weather -> do
+      when (debug cfg) $ hPrint stderr weather
+      printWeather weather
 
 main :: IO ()
-main = do
-  resp <- getConditions mykey mycity mystate
-  case resp of
-   Nothing -> putStrLn "No data for that city/state"
-   Just (Observation{..}) -> do
-     putStrLn $ "Observation time: " ++ obsTime
-     putStrLn $ "Weather conditions: " ++ obsWeather
-     putStrLn $ "Temp: " ++ show obsTemp
-     putStrLn $ "Rel humidity: " ++ show obsRelHumidity
-     putStrLn $ "Wind: " ++ obsWind
-     putStrLn $ "Feels like: " ++ obsFeelsLike
+main = run =<< execParser opts
+  where
+    opts = info (parseConfig <**> helper) (fullDesc <> header desc)
+    desc = "openweathermap "
+        ++ showVersion version
+        ++ " - command-line client for https://openweathermap.org/api"

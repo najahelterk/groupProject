@@ -38,11 +38,19 @@ library:
                       ,HDBC
                       ,HDBC-sqlite3
                       ,HaXml
-                      ,HTTP
+                      ,HTTP >= 4000.2.12
                       ,network-uri
                       ,unordered-containers >= 0.2.5
                       ,aeson >= 0.8.0
                       ,bytestring >= 0.10.4
+                      ,resourcet
+                      ,text >= 1.1.0
+                      ,unordered-containers >= 0.2.5
+                      ,aeson >= 0.8.0
+                      ,http-client
+                      ,servant
+                      ,servant-client == 0.11
+
 
 executables:
   weather-exe:
